@@ -8,9 +8,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 type BookingRow = Database['public']['Tables']['bookings']['Row'];
 
 const logError = (context: string, error: any) => {
-  // Don't log SecurityErrors as errors
   if (isSecurityError(error)) {
-    return; // Silently ignore SecurityErrors
+    return;
   }
   
   console.error(`${context}:`, {
@@ -27,19 +26,18 @@ export function useDriverProfile() {
   const authLoading = authQuery.isLoading;
   
   return useQuery({
-    queryKey: ['driver', session?.user?.id, session?.user],
+    queryKey: ['driver', session?.user?.email, session?.user],
     queryFn: async (): Promise<Driver | null> => {
-      if (!session?.user) {
+      if (!session?.user?.email) {
         return null;
       }
 
       try {
-        
-        // Query driver data using authenticated user's ID
+        // Query driver data using authenticated user's EMAIL (not ID)
         const { data: driverData, error: driverError } = await supabase
           .from('drivers')
           .select('*')
-          .eq('id', session.user.id)
+          .eq('email', session.user.email)
           .maybeSingle();
 
         if (driverError) {
@@ -51,7 +49,7 @@ export function useDriverProfile() {
           return null;
         }
 
-        // Query vehicle data using operator_id (the correct foreign key)
+        // Query vehicle data using operator_id
         const { data: vehicleData, error: vehicleError } = await supabase
           .from('vehicles')
           .select('*')
@@ -96,16 +94,16 @@ export function useDriverProfile() {
         }) || [];
 
         const todayEarnings = todayBookings.reduce((sum: number, b: BookingRow) => 
-          sum + (b.final_fare || b.fare || b.base_fare || 0), 0
+          sum + (b.final_fare || b.price || b.base_fare || 0), 0
         );
         const weekEarnings = weekBookings.reduce((sum: number, b: BookingRow) => 
-          sum + (b.final_fare || b.fare || b.base_fare || 0), 0
+          sum + (b.final_fare || b.price || b.base_fare || 0), 0
         );
         const monthEarnings = monthBookings.reduce((sum: number, b: BookingRow) => 
-          sum + (b.final_fare || b.fare || b.base_fare || 0), 0
+          sum + (b.final_fare || b.price || b.base_fare || 0), 0
         );
         const totalEarnings = bookingsData?.reduce((sum: number, b: BookingRow) => 
-          sum + (b.final_fare || b.fare || b.base_fare || 0), 0
+          sum + (b.final_fare || b.price || b.base_fare || 0), 0
         ) || 0;
 
         const result: Driver = {
@@ -149,9 +147,8 @@ export function useDriverProfile() {
         return null;
       }
     },
-    enabled: !!session?.user && !authLoading,
+    enabled: !!session?.user?.email && !authLoading,
     retry: (failureCount, error: any) => {
-      // Don't retry on SecurityError
       if (isSecurityError(error)) {
         return false;
       }
@@ -164,7 +161,6 @@ export function useDriverProfile() {
 }
 
 export function useTrips() {
-  // Always call hooks in the same order - no conditional hook calls
   const authQuery = useAuth();
   const driverQuery = useDriverProfile();
   
@@ -174,17 +170,14 @@ export function useTrips() {
   const driverLoading = driverQuery.isLoading;
   
   return useQuery({
-    queryKey: ['trips', session?.user?.id, driver?.id, session?.user],
+    queryKey: ['trips', session?.user?.email, driver?.id, session?.user],
     queryFn: async (): Promise<Trip[]> => {
       if (!session?.user || !driver?.id) {
         return [];
       }
 
       try {
-        
-        // Query trips in two parts:
-        // 1. Trips assigned to this driver
-        // 2. Pending trips that are ready for dispatch (posted by admin)
+        // Query trips assigned to this driver
         const { data: assignedTrips, error: assignedError } = await supabase
           .from('bookings')
           .select('*')
@@ -195,13 +188,10 @@ export function useTrips() {
           logError('Assigned trips query error', assignedError);
         }
 
-        // Only show pending trips that have been posted by dispatcher
-        
         let pendingTrips: any[] = [];
         let pendingError: any = null;
         
         try {
-          // Try the full query first
           const result = await supabase
             .from('bookings')
             .select('*')
@@ -212,7 +202,6 @@ export function useTrips() {
           pendingTrips = result.data || [];
           pendingError = result.error;
           
-          // Log basic info for debugging
           if (pendingTrips.length > 0) {
             console.log('Found', pendingTrips.length, 'pending trips');
           }
@@ -221,17 +210,12 @@ export function useTrips() {
           if (!pendingError && pendingTrips.length > 0) {
             pendingTrips = pendingTrips.filter(trip => {
               const hasRequiredFields = (
-                trip.pickup_address && 
-                trip.dropoff_address && 
-                (trip.fare || trip.base_fare || trip.final_fare)
+                trip.pickup && 
+                trip.destination && 
+                (trip.price || trip.base_fare || trip.final_fare)
               );
-              
-              // Filter out incomplete trips silently
-              
               return hasRequiredFields;
             });
-            
-            // Filtered pending trips
           }
         } catch (error) {
           console.error('Error in pending trips query:', error);
@@ -246,16 +230,14 @@ export function useTrips() {
           const rejectedTripsJson = await AsyncStorage.getItem(rejectedTripsKey);
           const rejectedTripIds = rejectedTripsJson ? JSON.parse(rejectedTripsJson) : [];
           
-          // Clean up old rejections (older than 24 hours)
           const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
           const validRejectedTripIds = rejectedTripIds.filter((tripId: string) => {
             const trip = (pendingTrips || []).find(t => t.id === tripId);
-            if (!trip) return false; // Trip no longer exists, remove from rejected list
+            if (!trip) return false;
             const tripDate = new Date(trip.created_at || 0);
-            return tripDate > oneDayAgo; // Keep rejections for trips created in last 24 hours
+            return tripDate > oneDayAgo;
           });
           
-          // Update storage if we cleaned up any old rejections
           if (validRejectedTripIds.length !== rejectedTripIds.length) {
             await AsyncStorage.setItem(rejectedTripsKey, JSON.stringify(validRejectedTripIds));
           }
@@ -263,27 +245,22 @@ export function useTrips() {
           filteredPendingTrips = (pendingTrips || []).filter(trip => 
             !validRejectedTripIds.includes(trip.id)
           );
-          
-          // Filtered out rejected trips
         } catch {
           // Silently handle rejection filtering errors
         }
 
         if (pendingError) {
           logError('Pending trips query error', pendingError);
-          // Return early if there's a critical error
           if (pendingError.code === '42703') {
             throw new Error(`Database schema error: ${pendingError.message}`);
           }
         }
 
-        // Combine both results
         const allTrips = [
           ...(assignedTrips || []),
           ...filteredPendingTrips
         ];
 
-        // Remove duplicates (shouldn't happen, but just in case)
         const uniqueTrips = allTrips.filter((trip, index, self) => 
           index === self.findIndex(t => t.id === trip.id)
         );
@@ -294,31 +271,27 @@ export function useTrips() {
 
         const trips: Trip[] = uniqueTrips
           .map(booking => {
-            // Calculate fare with better fallback logic
             let fare = 0;
             if (booking.final_fare && booking.final_fare > 0) {
               fare = booking.final_fare;
-            } else if (booking.fare && booking.fare > 0) {
-              fare = booking.fare;
+            } else if (booking.price && booking.price > 0) {
+              fare = booking.price;
             } else if (booking.base_fare && booking.base_fare > 0) {
               fare = booking.base_fare;
             } else {
-              // If no fare is set, calculate a basic fare based on distance
               const distance = booking.distance || 0;
-              fare = Math.max(5, distance * 2); // Minimum £5, £2 per unit distance
+              fare = Math.max(5, distance * 2);
             }
             
-            // Process trip data
-            
-            // Use the correct column names from database schema
-            const pickupAddress = booking.pickup_address || 'Address not available';
-            const dropoffAddress = booking.dropoff_address || 'Address not available';
+            // Use correct column names from database schema
+            const pickupAddress = booking.pickup || 'Address not available';
+            const dropoffAddress = booking.destination || 'Address not available';
             
             return {
               id: booking.id,
               status: booking.status,
               passenger: {
-                id: booking.passenger_id || 'unknown',
+                id: booking.user_id || 'unknown',
                 name: booking.passenger_name || 'Unknown Passenger',
                 rating: booking.passenger_rating || 5.0,
                 profileImage: booking.passenger_image || 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?ixlib=rb-1.2.1&auto=format&fit=crop&w=800&q=80',
@@ -338,15 +311,13 @@ export function useTrips() {
                 },
               },
               distance: booking.distance || 0,
-              duration: booking.duration || 0,
+              duration: typeof booking.duration === 'string' ? parseInt(booking.duration) || 0 : booking.duration || 0,
               fare: fare,
               timestamp: booking.created_at || new Date().toISOString(),
               paymentMethod: booking.payment_method || 'card',
             };
           });
 
-        // Trips query successful
-        
         return trips;
       } catch (error) {
         logError('Trips query failed', error);
@@ -355,20 +326,18 @@ export function useTrips() {
     },
     enabled: !!session && !!driver?.id && !authLoading && !driverLoading,
     retry: (failureCount, error: any) => {
-      // Don't retry on SecurityError or database schema errors
       if (isSecurityError(error) || error?.code === '42703') {
         return false;
       }
       return failureCount < 2;
     },
-    staleTime: 10000, // Shorter stale time for real-time trip updates
-    refetchInterval: 30000, // Refetch every 30 seconds for new trips
+    staleTime: 10000,
+    refetchInterval: 30000,
     throwOnError: false,
   });
 }
 
 export function useEarnings() {
-  // Always call hooks in the same order - no conditional hook calls
   const authQuery = useAuth();
   const driverQuery = useDriverProfile();
   
@@ -378,15 +347,13 @@ export function useEarnings() {
   const driverLoading = driverQuery.isLoading;
   
   return useQuery({
-    queryKey: ['earnings', session?.user?.id, driver?.id, session?.user],
+    queryKey: ['earnings', session?.user?.email, driver?.id, session?.user],
     queryFn: async (): Promise<EarningPeriod[]> => {
       if (!session?.user || !driver?.id) {
         return [];
       }
 
       try {
-        
-        // Get completed bookings for earnings calculation
         const { data: bookingsData, error: bookingsError } = await supabase
           .from('bookings')
           .select('*')
@@ -403,7 +370,6 @@ export function useEarnings() {
           return [];
         }
 
-        // Group bookings by date
         const groupedByDate = bookingsData.reduce((acc: Record<string, BookingRow[]>, booking) => {
           const date = booking.created_at ? new Date(booking.created_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
           if (!acc[date]) {
@@ -413,7 +379,6 @@ export function useEarnings() {
           return acc;
         }, {});
 
-        // Convert to EarningPeriod format
         const earnings = Object.entries(groupedByDate)
           .slice(0, 7)
           .map(([date, bookings]) => ({
@@ -424,8 +389,11 @@ export function useEarnings() {
               year: 'numeric' 
             }),
             trips: bookings.length,
-            amount: bookings.reduce((sum: number, b: BookingRow) => sum + (b.final_fare || b.fare || b.base_fare || 0), 0),
-            hours: bookings.reduce((sum: number, b: BookingRow) => sum + ((b.duration || 0) / 60), 0),
+            amount: bookings.reduce((sum: number, b: BookingRow) => sum + (b.final_fare || b.price || b.base_fare || 0), 0),
+            hours: bookings.reduce((sum: number, b: BookingRow) => {
+              const dur = typeof b.duration === 'string' ? parseInt(b.duration) || 0 : b.duration || 0;
+              return sum + (dur / 60);
+            }, 0),
           }));
 
         return earnings;
@@ -436,13 +404,12 @@ export function useEarnings() {
     },
     enabled: !!session && !!driver?.id && !authLoading && !driverLoading,
     retry: (failureCount, error: any) => {
-      // Don't retry on SecurityError
       if (isSecurityError(error)) {
         return false;
       }
       return failureCount < 2;
     },
-    staleTime: 60000, // 1 minute stale time for earnings
+    staleTime: 60000,
     throwOnError: false,
   });
 }
@@ -454,17 +421,15 @@ export function useUpdateDriverStatus() {
   
   return useMutation({
     mutationFn: async (status: 'online' | 'offline') => {
-      if (!session?.user) {
+      if (!session?.user?.email) {
         throw new Error('User not authenticated');
       }
 
-      // Update driver status
-      
-      // Update driver status using authenticated user's ID
+      // Update driver status using EMAIL (not ID)
       const { error: updateError } = await supabase
         .from('drivers')
         .update({ status, updated_at: new Date().toISOString() })
-        .eq('id', session.user.id);
+        .eq('email', session.user.email);
 
       if (updateError) {
         logError('Update driver status error', updateError);
@@ -475,7 +440,6 @@ export function useUpdateDriverStatus() {
     },
     onSuccess: (status) => {
       queryClient.invalidateQueries({ queryKey: ['driver'] });
-      // If going online, also refresh trips to get any pending ones
       if (status === 'online') {
         queryClient.invalidateQueries({ queryKey: ['trips'] });
       }
@@ -488,7 +452,6 @@ export function useUpdateDriverStatus() {
 
 export function useUpdateTripStatus() {
   const queryClient = useQueryClient();
-  // Always call hooks in the same order - no conditional hook calls
   const authQuery = useAuth();
   const driverQuery = useDriverProfile();
   
@@ -497,7 +460,7 @@ export function useUpdateTripStatus() {
   
   return useMutation({
     mutationFn: async ({ tripId, status }: { tripId: string; status: 'accepted' | 'completed' | 'cancelled' }) => {
-      if (!session?.user) {
+      if (!session?.user?.email) {
         throw new Error('User not authenticated');
       }
 
@@ -505,9 +468,6 @@ export function useUpdateTripStatus() {
         throw new Error('Driver not found');
       }
 
-      // Update trip status
-      
-      // For accepting a trip, we need to assign it to the current driver
       const updateData: any = { 
         status, 
         updated_at: new Date().toISOString() 
@@ -517,7 +477,6 @@ export function useUpdateTripStatus() {
         updateData.driver_id = driver.id;
       }
       
-      // Update trip status
       const { error: updateError } = await supabase
         .from('bookings')
         .update(updateData)
@@ -528,17 +487,13 @@ export function useUpdateTripStatus() {
         throw new Error(`Failed to update trip: ${updateError.message}`);
       }
 
-      // Trip status updated
-
-      // If completing a trip, update driver's total trips
+      // If completing a trip, update driver's total trips using EMAIL
       if (status === 'completed') {
-        
         try {
-          // Get current total trips and increment by 1
           const { data: driverData, error: driverQueryError } = await supabase
             .from('drivers')
             .select('total_trips')
-            .eq('id', session.user.id)
+            .eq('email', session.user.email)
             .single();
 
           if (driverQueryError) {
@@ -552,7 +507,7 @@ export function useUpdateTripStatus() {
                 total_trips: newTotalTrips,
                 updated_at: new Date().toISOString()
               })
-              .eq('id', session.user.id);
+              .eq('email', session.user.email);
 
             if (driverUpdateError) {
               logError('Update driver total trips error', driverUpdateError);
@@ -578,7 +533,6 @@ export function useUpdateTripStatus() {
 
 export function useRejectTrip() {
   const queryClient = useQueryClient();
-  // Always call hooks in the same order - no conditional hook calls
   const authQuery = useAuth();
   const driverQuery = useDriverProfile();
   
@@ -595,9 +549,6 @@ export function useRejectTrip() {
         throw new Error('Driver not found');
       }
 
-      // Reject trip for driver
-      
-      // Store the rejection locally so this driver won't see this trip again
       try {
         const rejectedTripsKey = `rejected_trips_${driver.id}`;
         const existingRejectedJson = await AsyncStorage.getItem(rejectedTripsKey);
